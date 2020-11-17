@@ -20,15 +20,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-
 	"strings"
 
-	airshipv1 "sipcluster/pkg/api/v1"
-
+	"github.com/go-logr/logr"
 	"github.com/PaesslerAG/jsonpath"
 	metal3 "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	airshipv1 "sipcluster/pkg/api/v1"
 )
 
 // ScheduledState
@@ -89,6 +89,7 @@ type Machine struct {
 	// Data will contain whatever information is needed from the server
 	// IF it ends up een just the IP then maybe we can collapse into a field
 	Data *MachineData
+	Log    logr.Logger
 }
 
 func (m *Machine) String() string {
@@ -250,7 +251,7 @@ func (ml *MachineList) initScheduleMaps(constraints []airshipv1.SchedulingOption
 		}
 	}
 
-	fmt.Printf("Schedule.initScheduleMaps  setMap:%v\n", setMap)
+	fmt.Printf("Schedule.initScheduleMaps setMap:%v\n", setMap)
 	if len(setMap) > 0 {
 		return setMap, nil
 	}

@@ -19,8 +19,10 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/go-logr/logr"
+	k8sapierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,6 +30,10 @@ import (
 	airshipv1 "sipcluster/pkg/api/v1"
 	airshipsvc "sipcluster/pkg/services"
 	airshipvms "sipcluster/pkg/vbmh"
+)
+
+const (
+	logerName = "sipcluster"
 )
 
 // SIPClusterReconciler reconciles a SIPCluster object
@@ -44,40 +50,47 @@ type SIPClusterReconciler struct {
 // +kubebuilder:rbac:groups="metal3.io",resources=baremetalhosts,verbs=get;update;patch;list
 
 func (r *SIPClusterReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
+	logger := r.Log.WithValues("SIPCluster", req.NamespacedName)
+	logger.Info("starting reconciliation cycle")
 	ctx := context.Background()
-	log := r.Log.WithValues("sipcluster", req.NamespacedName)
-
 	// Lets retrieve the SIPCluster
 	sip := airshipv1.SIPCluster{}
 	if err := r.Get(ctx, req.NamespacedName, &sip); err != nil {
-		//log.Error(err, "unable to fetch SIP Cluster")
-		// we'll ignore not-found errors, since they can't be fixed by an immediate
-		// requeue (we'll need to wait for a new notification), and we can get them
-		// on deleted requests.
-		return ctrl.Result{}, nil
+		if k8sapierrors.IsNotFound(err) {
+			// If not found it may have been deleted by after, doesn' not mean that error happened
+			logger.Info("no SIPCluster object found, nothing to do")
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 
 	// Check for Deletion
 	// name of our custom finalizer
 	sipFinalizerName := "sip.airship.airshipit.org/finalizer"
-	// Tghis only works if I add a finalizer to CRD TODO
+	// This only works if I add a finalizer to CRD TODO
 	if sip.ObjectMeta.DeletionTimestamp.IsZero() {
+		logger.Info("SIPcluster object is not deleted trying to gather BMHs for it")
 		// machines
-		err, machines := r.gatherVBMH(sip)
+		machines, err := r.gatherVBMH(sip)
 		if err != nil {
-			//log.Error(err, "unable to gather vBMHs")
-			return ctrl.Result{}, err
+			logger.Info("Failed to gather BaremetalHosts for SIPCluster", "error", err.Error())
+			// error is only logged, we don't want reconciliation errors to flood the log because no bmh hosts available
+			// TODO Rework gatherVBMH to return error only when real error happens, if no bmh hosts currently available
+			// doesn't mean that it is an error, instead controller should simply requeue the request and keep checking
+			// for hosts.
+			// TODO Investigate on Requeue parameters
+			return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 30}, nil
 		}
 
 		err = r.deployInfra(sip, machines)
 		if err != nil {
-			log.Error(err, "unable to deploy infrastructure services")
+			logger.Error(err, "unable to deploy infrastructure services")
 			return ctrl.Result{}, err
 		}
 
 		err = r.finish(sip, machines)
 		if err != nil {
-			log.Error(err, "unable to finish creation/update ..")
+			logger.Error(err, "unable to finish creation/update ..")
 			return ctrl.Result{}, err
 		}
 	} else {
@@ -86,7 +99,7 @@ func (r *SIPClusterReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) 
 			// our finalizer is present, so lets handle any external dependency
 			err := r.finalize(sip)
 			if err != nil {
-				log.Error(err, "unable to finalize")
+				logger.Error(err, "unable to finalize")
 				return ctrl.Result{}, err
 			}
 
@@ -96,7 +109,6 @@ func (r *SIPClusterReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) 
 				return ctrl.Result{}, err
 			}
 		}
-
 	}
 	return ctrl.Result{}, nil
 }
@@ -153,33 +165,30 @@ func removeString(slice []string, s string) (result []string) {
 */
 
 // machines
-func (r *SIPClusterReconciler) gatherVBMH(sip airshipv1.SIPCluster) (error, *airshipvms.MachineList) {
+func (r *SIPClusterReconciler) gatherVBMH(sip airshipv1.SIPCluster) (*airshipvms.MachineList, error) {
+	// TODO consider passing logger as well
+	logger := r.Log.WithValues("SIPCluster", sip.GetNamespace()+"/"+sip.GetName())
 	// 1- Let me retrieve all BMH  that are unlabeled or already labeled with the target Tenant/CNF
 	// 2- Let me now select the one's that meet teh scheduling criteria
 	// If I schedule successfully then
 	// If Not complete schedule , then throw an error.
 	machines := &airshipvms.MachineList{}
 
-	// TODO : this is a loop until we succeed or cannot find a schedule
-	for {
-		fmt.Printf("gatherVBMH.Schedule sip:%v machines:%v\n", sip, machines)
-		err := machines.Schedule(sip, r.Client)
-		if err != nil {
-			return err, machines
-		}
-
-		// we extract the information in a generic way
-		// So that LB ,  Jump and Ath POD  all leverage the same
-		// If there are some issues finnding information the vBMH
-		// Are flagged Unschedulable
-		// Loop and Try to find new vBMH to complete tge schedule
-		//fmt.Printf("gatherVBMH.Extrapolate sip:%v machines:%v\n", sip, machines)
-		if machines.Extrapolate(sip, r.Client) {
-			break
-		}
+	logger.Info("attempting to schedule BaremetalHost objects")
+	err := machines.Schedule(sip, r.Client)
+	if err != nil {
+		return machines, err
 	}
 
-	return nil, machines
+	// we extract the information in a generic way
+	// So that LB ,  Jump and Ath POD  all leverage the same
+	// If there are some issues finnding information the vBMH
+	// Are flagged Unschedulable
+	// Loop and Try to find new vBMH to complete tge schedule
+	if !machines.Extrapolate(sip, r.Client) {
+		logger.Info("Could not extrapolate Machine information")
+	}
+	return machines, nil
 }
 
 func (r *SIPClusterReconciler) deployInfra(sip airshipv1.SIPCluster, machines *airshipvms.MachineList) error {
