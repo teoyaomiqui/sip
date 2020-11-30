@@ -98,6 +98,7 @@ const (
 
 	// ServerAntiAffinity means the state is unknown
 	ServerAntiAffinity SchedulingOptions = "per-node"
+	SchedulingAlgorithmAny SchedulingOptions = "any"
 )
 
 type InfraConfig struct {
