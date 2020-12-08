@@ -229,7 +229,11 @@ func CreateSIPCluster(name string, namespace string, masters int, workers int) *
 					},
 				},
 			},
-			InfraServices: map[airshipv1.InfraService]airshipv1.InfraConfig{},
+			InfraServices: map[airshipv1.InfraService]airshipv1.InfraConfig{
+                airshipv1.LoadBalancerService: {
+                    NodeInterface: "eno3",
+                },
+            },
 		},
 		Status: airshipv1.SIPClusterStatus{},
 	}
